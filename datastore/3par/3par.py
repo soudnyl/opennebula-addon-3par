@@ -334,8 +334,15 @@ def monitorCPG(cl, args):
 
         diskResult = []
         for disk in disks:
+          nameFinal;
+          nameNew = '{namingType}.vm.{vmId}.{diskId}'.format(namingType=args.namingType, vmId=vm.get('ID'), diskId=disk.get('DISK_ID'))
+          nameOld = '{namingType}.one.vm.{vmId}.{diskId}.vv'.format(namingType=args.namingType, vmId=vm.get('ID'), diskId=disk.get('DISK_ID'))
+          if ( any(vv for vv in vvs.get('members') if vv.get('name') == nameNew) ):
+            nameFinal = nameNew
+          elif ( any(vv for vv in vvs.get('members') if vv.get('name') == nameOld)):
+            nameFinal = nameOld
           if disk.get('CLONE') == 'YES' or disk.get('SOURCE') is None or disk.get('SOURCE') == '':
-            name = '{namingType}.vm.{vmId}.{diskId}'.format(namingType=args.namingType, vmId=vm.get('ID'), diskId=disk.get('DISK_ID'))
+            name = nameFinal
           else:
             source = disk.get('SOURCE').split(':')
             name = source[0]
@@ -355,9 +362,10 @@ def createVV(cl, args):
     print('{name}:{wwn}'.format(name=name, wwn=wwn))
 
 def getVV(cl, args):
-    vv = cl.getVolume(args.name)
+    name = interopGetName(args.name)
+    vv = cl.getVolume(name)
     wwn = vv.get('wwn').lower()
-    print('{name}:{wwn}'.format(name=args.name, wwn=wwn))
+    print('{name}:{wwn}'.format(name=name, wwn=wwn))
 
 def deleteVV(cl, args):
     name = createVVName(args.namingType, args.id)
@@ -394,10 +402,10 @@ def copyVV(cl, args):
   cl.copyVolume(srcName, args.destName, args.cpg, optional)
 
 def growVV(cl, args):
-    cl.growVolume(args.name, args.growBy)
+    cl.growVolume(interopGetName(args.name), args.growBy)
 
 def getVVSize(cl, args):
-    vv = cl.getVolume(args.name)
+    vv = cl.getVolume(interopGetName(args.name))
 
     if args.type == 'USED':
         print(vv.get('userSpace').get('usedMiB'))
@@ -407,7 +415,7 @@ def getVVSize(cl, args):
         print(vv.get('sizeMiB'))
 
 def exportVV(cl, args):
-    name = args.name
+    name = interopGetName(args.name)
     host = args.host
 
     # check if VLUN already exists
@@ -431,7 +439,7 @@ def exportVV(cl, args):
             time.sleep(5)
 
 def unexportVV(cl, args):
-    name = args.name
+    name = interopGetName(args.name)
     host = args.host
 
     # check if VLUN exists
@@ -470,7 +478,7 @@ def createVmClone(cl, args):
     i = 0
     while not done:
         try:
-            cl.copyVolume(args.srcName, destName, args.cpg, optional)
+            cl.copyVolume(interopGetName(args.srcName), destName, args.cpg, optional)
             done = True
         except exceptions.HTTPConflict as ex:
             # failed after 5 tries, revert, exit
@@ -519,6 +527,21 @@ def createVVSetSnapshot(cl, args):
     snapId = 's{snapId}'.format(snapId=args.snapId)
     vvsetName = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
 
+    vvsetNameNew = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameOld = '{namingType}.one.vm.{vmId}.vvset'.format(namingType=args.namingType, vmId=args.vmId)
+
+    # get volume set info
+    try:
+        vvset = cl.getVolumeSet(vvsetNameOld)
+        vvsetName = vvsetNameOld
+    except exceptions.HTTPNotFound:
+        try:
+            vvset = cl.getVolumeSet(vvsetNameNew)
+            vvsetName = vvsetNameNew
+        except exceptions.HTTPNotFound:
+            print("Both old and new vvsets don't exist. Exiting")
+            return
+
     # get volume set info
     try:
         vvset = cl.getVolumeSet(vvsetName)
@@ -559,15 +582,26 @@ def createVVSetSnapshot(cl, args):
 
 def deleteVVSetSnapshot(cl, args):
     snapId = 's{snapId}'.format(snapId=args.snapId)
-    vvsetName = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameNew = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameOld = '{namingType}.one.vm.{vmId}.vvset'.format(namingType=args.namingType, vmId=args.vmId)
 
+    vvsetExistsNew = 1
+    vvsetExistsOld = 1
     # get volume set info
     try:
-        vvset = cl.getVolumeSet(vvsetName)
+        vvset = cl.getVolumeSet(vvsetNameNew)
         members = vvset.get('setmembers')
     except exceptions.HTTPNotFound:
-        print('Volume set does not exits, exiting...')
-        return
+      vvsetExistsNew = 0
+    try:
+        vvset = cl.getVolumeSet(vvsetNameOld)
+        members = vvset.get('setmembers')
+    except exceptions.HTTPNotFound:
+      vvsetExistsOld = 0
+
+    if ( not (vvsetExistsNew or vvsetExistsOld) ):
+      print("No vvset exists. Exiting")
+      return
 
     # no members in volume set? unexpected
     if not members or not len(members) > 0:
@@ -769,30 +803,50 @@ def getIscsiPortals(cl, args):
     return
 
 def addVolumeToVVSet(cl, args):
-    vvsetName = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameNew = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameOld = '{namingType}.one.vm.{vmId}.vvset'.format(namingType=args.namingType, vmId=args.vmId)
+
+    # get volume set info
+    try:
+      cl.getVolumeSet(vvsetNameOld)
+      vvsetName = vvsetNameOld
+    except exceptions.HTTPNotFound:
+      try:
+        cl.getVolumeSet(vvsetNameNew)
+      except exceptions.HTTPNotFound:
+        cl.createVolumeSet(vvsetNameNew, None, args.comment)
+
+    vvsetName = vvsetNameNew
 
     # get or create vvset
-    try:
-        cl.getVolumeSet(vvsetName)
-    except exceptions.HTTPNotFound:
-        print('Volume Set does not exists, create new')
-        cl.createVolumeSet(vvsetName, None, args.comment)
+    # try:
+    #     cl.getVolumeSet(vvsetName)
+    # except exceptions.HTTPNotFound:
+    #     print('Volume Set does not exists, create new')
+    #     cl.createVolumeSet(vvsetName, None, args.comment)
 
     # add volume to vvset
     try:
-        cl.addVolumeToVolumeSet(vvsetName, args.name)
+        cl.addVolumeToVolumeSet(vvsetName, interopGetName(args.name))
     except exceptions.HTTPConflict as ex:
         print('VV already mapped to VV Set')
 
 
 def deleteVolumeFromVVSet(cl, args):
-    vvsetName = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameNew = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameOld = '{namingType}.one.vm.{vmId}.vvset'.format(namingType=args.namingType, vmId=args.vmId)
 
     # remove volume from volume set
     try:
-        cl.removeVolumeFromVolumeSet(vvsetName, args.name)
+        cl.removeVolumeFromVolumeSet(vvsetNameOld, interopGetName(args.name))
+        vvsetName = vvsetNameOld
     except exceptions.HTTPNotFound:
-        print('Volume is already removed from vv set')
+      try:
+          cl.removeVolumeFromVolumeSet(vvsetNameNew, interopGetName(args.name))
+          vvsetName = vvsetNameNew
+      except exceptions.HTTPNotFound:
+          print('Volume set does not exist. Exiting')
+          return
 
     # get volume set info
     try:
@@ -814,7 +868,19 @@ def deleteVolumeFromVVSet(cl, args):
 
 
 def createQosPolicy(cl, args):
-    vvsetName = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameNew = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameOld = '{namingType}.one.vm.{vmId}.vvset'.format(namingType=args.namingType, vmId=args.vmId)
+
+    try:
+      vvset = cl.getVolumeSet(vvsetNameOld)
+      vvsetName = vvsetNameOld
+    except exceptions.HTTPNotFound:
+      try:
+        vvset = cl.getVolumeSet(vvsetNameNew)
+        vvsetName = vvsetNameNew
+      except exceptions.HTTPNotFound:
+        print("Can't create QoS for nonexistent VVSet. Exiting")
+        return
 
     # create QoS policy if not exists
     qosRules = prepareQosRules(args)
@@ -835,7 +901,20 @@ def createQosPolicy(cl, args):
 
 
 def deleteQosPolicy(cl, args):
-    vvsetName = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameNew = '{namingType}.vm.{vmId}'.format(namingType=args.namingType, vmId=args.vmId)
+    vvsetNameOld = '{namingType}.one.vm.{vmId}.vvset'.format(namingType=args.namingType, vmId=args.vmId)
+
+    # get volume set info
+    try:
+        vvset = cl.getVolumeSet(vvsetNameOld)
+        vvsetName = vvsetNameOld
+    except exceptions.HTTPNotFound:
+        try:
+            vvset = cl.getVolumeSet(vvsetNameNew)
+            vvsetName = vvsetNameNew
+        except exceptions.HTTPNotFound:
+            print('Both new and old vvsets do not exist. exiting..')
+            return
 
     # get volume set info
     try:
@@ -863,10 +942,28 @@ def createPortName(portPos):
     return '{node}:{slot}:{cardPort}'.format(node=portPos['node'], slot=portPos['slot'], cardPort=portPos['cardPort'])
 
 def createVVName(namingType, id):
-    return '{namingType}.{id}'.format(namingType=namingType, id=id)
+    vvNameNew = '{namingType}.{id}'.format(namingType=namingType, id=id)
+    vvNameOld = '{namingType}.one.{id}.vv'.format(namingType=namingType, id=id)
+    try:
+      cl.getVolume(vvNameOld)
+      vvName = vvNameOld
+    except exceptions.HTTPNotFound:
+      vvName = vvNameNew
+    return vvName
 
 def createVmCloneName(namingType, id, vmId):
-    return '{namingType}.vm.{vmId}.{id}'.format(namingType=namingType, id=id, vmId=vmId)
+    #print("Vstup" + id)
+    if id == 'cp': id='checkpoint'
+    vvsetNameOld = '{namingType}.one.vm.{vmId}.{id}.vv'.format(namingType=namingType, id=id, vmId=vmId)
+    if id == 'checkpoint': id='cp'
+    vvsetNameNew = '{namingType}.vm.{vmId}.{id}'.format(namingType=namingType, id=id, vmId=vmId)
+    #print(vvsetNameNew + "    " + vvsetNameOld)
+    try:
+      cl.getVolume(vvsetNameOld)
+      vvsetName = vvsetNameOld
+    except exceptions.HTTPNotFound:
+      vvsetName = vvsetNameNew
+    return vvsetName
 
 def createSnapshotNameAndMetaKey(srcName, snapId):
     name = '{srcName}.{snapId}'.format(srcName=srcName, snapId=snapId)
@@ -973,6 +1070,17 @@ def prepareIscsiNames(args):
     else:
         return args.iscsiNames.split(',')
 
+def interopGetName(name):
+    try:
+        cl.getVolume(name)
+        return name
+    except exceptions.HTTPNotFound:
+        splitName = name.split('.')
+        if splitName[1] == "one":
+            del splitName[1]
+        if splitName[len(splitName)-1] in ["vv","vvset"]:
+            del splitName[len(splitName)-1]
+        return ".".join(splitName)
 
 
 # -------------------------------------
